@@ -1,0 +1,1180 @@
+#+TITLE: Supporting Materials -- Analytical Details and Computer Code
+#+AUTHOR: Song S. Qian 
+#+DATE: \date{\today}
+#+OPTIONS: toc:t H:2 num:2
+#+LATEX_HEADER: \usepackage{biblatex}
+#+LATEX_HEADER: \addbibresource{~/Dropbox/LaTeX/maintxt.bib}
+
+* Introduction
+We document the statistical methods and R code used in the paper.
+The raw ELISA test data were presented in Excel sheets, one sheet for
+each lab analysis.  The document is written in org-mode.  The source
+code and data are posted in my blog\footnote{http://songqiansblog.blogspot.com/}.  
+
+An ELISA result sheet from Stone Lab consists of two parts.  One (from
+row 23 to 30) reports the raw absorption reading from the kit, and the
+other (starting at row 33) calculates the MC concentration and records
+the dilution factor.  We saved these Excel sheets into comma delimited
+text files and imported into R.
+ 
+* Initial Setup
+
+# R session setup
+#+NAME: setup
+#+BEGIN_SRC R :session *R* :results value 
+  ## attaching and installing (if not already installed) 
+  ##  necessary' packages 
+  packages<-function(x, repos="http://cran.r-project.org", ...){
+    x<-as.character(match.call()[[2]]) 
+    if (!require(x,character.only=TRUE)){ 
+        install.packages(pkgs=x, repos=repos, ...)
+        require(x,character.only=TRUE) 
+    } 
+  }
+
+  DIR <- "Google\ Drive/Risk\ Assessment"
+  os <- "OSX" ## or "LNX" or "WND"
+
+  if (os=="OSX" | os == "LNX"){## for Mac and Linux
+    plat <- "~"
+  } else {
+    plat <- "C:/Users/song"
+  }
+
+  base <- paste(plat, DIR, sep="/") 
+
+  setwd(base)
+  dataDIR <- paste(base, "Data", sep="/") 
+     ## put data in the Data subdirectory
+  plotDIR <- paste(base, "manuscript", sep="/")
+
+  packages(arm)
+  packages(rv)
+  packages(lattice)
+  packages(parallel)
+  packages(tikzDevice)
+  packages(rstan)
+  packages(loo)
+#+END_SRC
+   
+* Reading and processing data
+
+  Each spreadsheet (after saving in comma separated version) consists
+  of two components -- optical density and concentration calculation.
+  They are imported to R separately.  We wrote a function for
+  importing and postprocessing.
+
+#+name: R-reading-data
+#+begin_src R :exports both :results silent
+
+  input <- function(infile){
+      tmp1 <- read.table(paste(dataDIR, infile, sep="/"), sep=",",
+                         skip=21, nrow=8, header=F)[,-c(1,2)]
+      tmp1 <- tmp1[,-dim(tmp1)[2]]
+      tmp2 <- read.csv(paste(dataDIR, infile, sep="/"), 
+                   skip=31, header=T)[,2:7]
+      tmp <- apply(as.matrix(tmp1), 2, sum, na.rm=T) == 0
+      tmp1 <- tmp1[,!tmp]
+      tmp <- apply(tmp2,1, FUN=function(x) sum(!is.na(x)))!=1
+      tmp2 <- tmp2[tmp,]  
+      if (dim(tmp1)[2]%%2 !=0) stop("Number of rows must be even")
+      ## two replicates are used
+      dm1 <- dim(tmp1)[2]/2
+
+      tmp1 <- unlist(tmp1)
+
+      ## 
+      n <- length(tmp1) - 2*dim(tmp2)[1]
+      if (n<0)    stop ("Check data")
+      if (n > 0){
+          nas <- as.data.frame(matrix(NA, nrow=n/2, ncol=dim(tmp2)[2]))
+          names(nas) <- names(tmp2)
+          tmp2 <- rbind(tmp2, nas)
+      }
+
+      ##
+      rws <- NULL
+      for (i in 1:dm1)
+          rws <- c(rws, rep(((i-1)*8+1):(i*8), 2))
+      tmp2 <- tmp2[rws,]
+      tmp2$Abs.obs <- tmp1
+
+      ## 2 reference abs
+      refabs <- tmp2$Abs.obs[tmp2$conc==0 & !is.na(tmp2$conc)]
+      b0b1.1 <- tmp2$ABS/refabs[1]
+      b0b1.2 <- tmp2$ABS/refabs[2]
+      b0b1.3 <- tmp2$ABS/mean(refabs)
+
+      calib <- data.frame(y1=b0b1.1, y2=b0b1.2, y3=b0b1.3, 
+                          conc=tmp2$conc, ABS = tmp2$Abs.obs)
+      calib$smp <- tmp2$X.1
+      ##  calib.data <- calib.data[calib.data$conc!=0,]
+      calib$conc[substring(calib$smp, 1, 8)!="Standard"] <- NA
+      tmp <- !is.na(calib$smp)
+      return(calib[tmp,])
+  }
+
+  calib.Jul22B <- input(infile="July22B.csv") #1
+  calib.Aug04 <- input(infile="Aug04.5.csv")  #2 
+  calib.Aug11 <- input(infile="Aug11.12.csv") #3
+  calib.Aug18 <- input(infile="Aug18.19.csv") #4
+  calib.Aug2526 <- input(infile="Aug25.26.csv")#5
+  calib.Aug25 <- input(infile="Aug25.csv")     #6
+  calib.Aug2728 <- input(infile="Aug27.28.csv") #7
+  calib.Oct06 <- input(infile="Oct06.7.csv")    #8
+  calib.Oct1314 <- input(infile="Oct13.14.csv") #9
+  calib.Oct2021 <- input(infile="Oct20.21.csv") #10
+  calib.Sep02 <- input(infile="Sept02.3.csv")   #11
+  calib.Sep08 <- input(infile="Sept08.9.csv")   #12
+  calib.Sep15 <- input(infile="Sep152014.csv")  #13
+  calib.Sep1516 <- input(infile="Sept15.16.csv") #14
+  calib.Sep2223 <- input(infile="Sept22.23.csv") #15
+  calib.Sep2930 <- input(infile="Sept29.30.csv") #16
+  calib.UT <- input(infile="UTAug28.Oct16.csv")  #17
+  calib.MBOSU <- input(infile="MaumeeBay.OSUSep11.csv") #18
+  calib.BIM <- input(infile="BIMexpSep25.csv")   #19
+  calib.Katie <- input(infile="CC024.27KatieExpJul31.csv") #20
+  ## check the two missing values in orignial file  
+  calib.KIJul21 <- input(infile="KIfinishedJuly21.22.csv") #21
+  ## two data sets cannot be properly processed --
+  ### Ren exp#1 A 430pm.xlsx and Microcystin Ren exp#2 Microcystin.xlsx
+  ## these two REN files had quality issues and will be used later for 
+  ##   model checking after quality issues are resolved
+
+  data.all <- rbind(calib.Jul22B, calib.Aug04, calib.Aug11, calib.Aug18,
+                    calib.Aug2526, calib.Aug25, calib.Aug2728,
+                    calib.Oct06, calib.Oct1314, calib.Oct2021, 
+                    calib.Sep02, calib.Sep08, calib.Sep15, calib.Sep1516,
+                    calib.Sep2223, calib.Sep2930, calib.UT, calib.MBOSU,
+                    calib.BIM, calib.KIJul21, calib.Katie)
+  data.all$Tests <- c(rep("Jul22", dim(calib.Jul22B)[1]),
+                      rep("Aug04", dim(calib.Aug04)[1]),
+                      rep("Aug11", dim(calib.Aug11)[1]),
+                      rep("Aug18", dim(calib.Aug18)[1]),
+                      rep("Aug256", dim(calib.Aug2526)[1]),
+                      rep("Aug25", dim(calib.Aug25)[1]),
+                      rep("Aug27", dim(calib.Aug2728)[1]),
+                      rep("Oct06", dim(calib.Oct06)[1]),
+                      rep("Oct13", dim(calib.Oct1314)[1]),
+                      rep("Oct20", dim(calib.Oct2021)[1]),
+                      rep("Sep02", dim(calib.Sep02)[1]),
+                      rep("Sep08", dim(calib.Sep08)[1]),
+                      rep("Sep15", dim(calib.Sep15)[1]),
+                      rep("Sep156", dim(calib.Sep1516)[1]),
+                      rep("Sep22", dim(calib.Sep2223)[1]),
+                      rep("Sep29", dim(calib.Sep2930)[1]),
+                      rep("UT", dim(calib.UT)[1]),
+                      rep("OSU", dim(calib.MBOSU)[1]),
+                      rep("BIM", dim(calib.BIM)[1]),
+                      rep("KIJul21", dim(calib.KIJul21)[1]),
+                      rep("Katie", dim(calib.Katie)[1]))
+
+  ## ELISA standards only
+
+  data.elisa <- rbind(calib.Jul22B[1:6,], calib.Aug04[1:6,], calib.Aug11[1:6,],
+                    calib.Aug18[1:6,], calib.Aug2526[1:6,], calib.Aug25[1:6,],
+                    calib.Aug2728[1:6,], calib.Oct06[1:6,], calib.Oct1314[1:6,],
+                    calib.Oct2021[1:6,], calib.Sep02[1:6,], calib.Sep08[1:6,],
+                    calib.Sep15[1:6,], calib.Sep1516[1:6,], calib.Sep2223[1:6,],
+                    calib.Sep2930[1:6,], calib.UT[1:6,], calib.MBOSU[1:6,],
+                    calib.BIM[1:6,], calib.KIJul21[1:6,], calib.Katie[1:6,])
+  data.elisa$Tests <- c(rep("Jul22", 6), rep("Aug04", 6), rep("Aug11", 6),
+                      rep("Aug18",6), rep("Aug256", 6), rep("Aug25", 6),
+                      rep("Aug27", 6), rep("Oct06", 6), rep("Oct13", 6),
+                      rep("Oct20", 6), rep("Sep02", 6), rep("Sep08", 6),
+                      rep("Sep15", 6), rep("Sep156", 6), rep("Sep22", 6),
+                      rep("Sep29", 6), rep("UT", 6), rep("OSU", 6), 
+                      rep("BIM", 6), rep("KIJul21", 6), rep("Katie", 6))
+
+
+#+end_src
+
+* Fitting alternative models
+  There are two model forms: the 4-parameter nonlinear regression
+  model used by Toledo and the log-linear regression model used by
+  OSU.  When using the log-linear model, we derive the response
+  variable data by dividing ABS with the mean ABS from the standard
+  concentration of 0. To fully account for method uncertainty, we fit
+  the model using expanded data by calculating the absorbance ratio
+  using both the individual 0 concentration absorbances and the
+  average 0 concentration absorbance.
+
+** Log-linear regression
+In theory, we should fit the model using concentration as the
+predictor.  But OSU used concentration as the response.  We will try
+both as Toledo uses concentration as the predictor in their nonlinear
+regression model.
+
+*** Uncertainty in a regression model
+Although the reported coefficient of determination ($R^2$) value of a
+typical ELISA assay is high, the resulting standard curve (the
+regression model) can be highly uncertain because the small sample
+size.  We use data from the assay performed on August 4, 2015 (which
+resulted in a model with an $R^2$ value of 0.9993) to illustrate the
+model uncertainty.  
+
+#+NAME: uncertainty
+#+begin_SRC R :exports both :results silent
+   data1 <- calib.Aug04[1:6,]
+   aug04.lm <- lm(log(conc) ~ y3, data=data1, subset=conc!=0)
+   aug04lm.sim <- posterior(aug04.lm)
+   coef.aug04 <- coef(aug04.lm)
+  
+   pred.sim <-
+   summary(exp(rvnorm(mean=aug04lm.sim$beta[1]+
+                           aug04lm.sim$beta[2]*seq(0,1,,100),
+                      sd=aug04lm.sim$sigma))) 
+  ## predictive distribtuions
+  
+   data2 <- calib.MBOSU[1:6,]
+   osu.lm <- lm(log(conc) ~ y3, data=data2, subset=conc!=0)
+   osulm.sim <- posterior(osu.lm)
+   coef.osu <- coef(osu.lm)
+  
+   pred.sim2 <-
+   summary(exp(rvnorm(mean=osulm.sim$beta[1]+
+                           osulm.sim$beta[2]*seq(0,1,,500),
+                      sd=osulm.sim$sigma))) ## predictive distributions
+  
+   all.lm <- lm(log(conc) ~ y3*factor(Tests)-1-y3, data=data.elisa, 
+                subset=conc!=0)
+     b0 <- coef(all.lm)[1:21]
+     b1 <- coef(all.lm)[22:42]
+  
+   ## Figure 1
+  
+   tikz(file=paste(plotDIR, "simLM1.tex", sep="/"), height=6.5,
+        width=4.75, standAlone=F)
+   par(mfrow=c(3,1),mgp=c(1.25,0.25,0), las=1, tck=0.01)
+   par(mar=c(0, 3, 3, 2.5))
+   plot(conc ~ y3, data=data.elisa, subset=conc!=0,type="n",
+        ylab=" ", xlab=" ", axes=F)
+   polygon(x=c(seq(0,1,,100), rev(seq(0,1,,100))), 
+           y=c(pred.sim[,4],rev(pred.sim[,8])),
+           col=grey(0.75), border=NA) 
+   polygon(x=c(seq(0,1,,100), rev(seq(0,1,,100))),
+           y=c(pred.sim[,5],rev(pred.sim[,7])),
+           col=grey(0.5), border=NA) 
+   lines(seq(0.1,1,,100), 
+        exp(coef.aug04[1] + coef.aug04[2]*seq(0.1,1,,100)))
+   abline(h=1, lty=2)
+   points(data1$y3, data1$conc, cex=0.75, pch=16)
+   axis(3)
+   axis(4)
+   box()
+   text(1, 4, "(a)")
+  
+   par(mar=c(1.5,3,1.5,2.5))
+   plot(conc ~ y3, data=data.elisa, subset=conc!=0,type="n",
+        ylab="MC Concentration ($\\mu$g/L)", xlab=" ", axes=F)
+   polygon(x=c(seq(0,1,,500), rev(seq(0,1,,500))),
+           y=c(pred.sim2[,4],rev(pred.sim2[,8])), 
+           col=grey(0.75), border=NA) 
+   polygon(x=c(seq(0,1,,500), rev(seq(0,1,,500))),
+           y=c(pred.sim2[,5],rev(pred.sim2[,7])), 
+           col=grey(0.5), border=NA) 
+   lines(seq(0.1,1,,100), 
+         exp(coef.osu[1] + coef.osu[2]*seq(0.1,1,,100)))
+   abline(h=1, lty=2)
+   points(data2$y3, data2$conc, cex=0.75, pch=16)
+   axis(2)
+   box()
+   text(1, 4, "(b)")
+  
+   par(mar=c(3,3,0,2.5))
+   plot(conc ~ y3, data=data.elisa, subset=conc!=0, xlab="$rOD$",
+        ylab=" ", type="n")
+     for (i in 1:21)
+         lines(seq(0.1,1.1,,100), exp(b0[i]+b1[i]*seq(0.1,1.1,,100)), 
+               col="gray")
+   points(data.elisa$y3, data.elisa$conc, pch=16, cex=0.75)
+   axis(1)
+   axis(4)
+   box()
+   text(1, 4, "(c)")
+  
+   dev.off()
+  
+  
+  
+  tikz(file=paste(plotDIR, "WERFfig.tex", sep="/"), height=1.75,
+       width=6, standAlone=F)
+  par(mfrow=c(1,3),mgp=c(1.25,0.25,0), las=1, tck=0.01)
+  par(mar=c(3, 3, 0.125, 0))
+  plot(conc ~ y3, data=data.elisa, subset=conc!=0,type="n",
+       ylab="MC Concentration ($\\mu$g/L)", xlab=" ", axes=F)
+  polygon(x=c(seq(0,1,,100), rev(seq(0,1,,100))), 
+          y=c(pred.sim[,4],rev(pred.sim[,8])),
+          col=grey(0.75), border=NA) 
+  polygon(x=c(seq(0,1,,100), rev(seq(0,1,,100))),
+          y=c(pred.sim[,5],rev(pred.sim[,7])),
+          col=grey(0.5), border=NA) 
+  lines(seq(0.1,1,,100), 
+        exp(coef.aug04[1] + coef.aug04[2]*seq(0.1,1,,100)))
+  abline(h=1, lty=2)
+  points(data1$y3, data1$conc, cex=0.75, pch=16)
+  axis(1)
+  axis(2)
+  box()
+  text(1, 4, "(a)")
+  text(0.8, 3, "$R^2=0.9993$")
+  
+  par(mar=c(3, 1.5,0.125,1.5))
+  plot(conc ~ y3, data=data.elisa, subset=conc!=0,type="n",
+       xlab="Relative Optical Density", ylab=" ", axes=F)
+  polygon(x=c(seq(0,1,,500), rev(seq(0,1,,500))),
+          y=c(pred.sim2[,4],rev(pred.sim2[,8])), 
+          col=grey(0.75), border=NA) 
+  polygon(x=c(seq(0,1,,500), rev(seq(0,1,,500))),
+          y=c(pred.sim2[,5],rev(pred.sim2[,7])), 
+          col=grey(0.5), border=NA) 
+  lines(seq(0.1,1,,100), 
+        exp(coef.osu[1] + coef.osu[2]*seq(0.1,1,,100)))
+  abline(h=1, lty=2)
+  points(data2$y3, data2$conc, cex=0.75, pch=16)
+  axis(1)
+  box()
+  text(1, 4, "(b)")
+  text(0.8, 3, "$R^2=0.94$")
+  
+   par(mar=c(3,0,0.125,3))
+   plot(conc ~ y3, data=data.elisa, subset=conc!=0, xlab=" ",
+        ylab=" ", type="n", axes=F)
+     for (i in 1:21)
+         lines(seq(0.1,1.1,,100), exp(b0[i]+b1[i]*seq(0.1,1.1,,100)), 
+               col="gray")
+   points(data.elisa$y3, data.elisa$conc, pch=16, cex=0.75)
+   axis(1)
+   axis(4)
+   box()
+   text(1, 4, "(c)")
+  
+   dev.off()
+  
+#+end_src
+
+The figure shows a substantial level of uncertainty in the model,
+particularly, the range of the \%B/B0 values that can result in a
+predicted concentration of 1 $\mu$g/L is large (approximately from
+0.45 to 0.55).  This level of model uncertainty (despite of a near 1
+$R^2$ value) is largely the result of a small sample size.  
+
+As we have a large number of tests, we can now estimate curves for all
+assays:
+
+#+NAME: all_data
+#+BEGIN_SRC R :exports both :results silent
+  all.lm <- lm(log(conc) ~ y3*factor(Tests)-1-y3, data=data.elisa,
+               subset=conc!=0)
+  b0 <- coef(all.lm)[1:21]
+  b1 <- coef(all.lm)[22:42]
+  
+  tikz(file=paste(plotDIR, "simLM2.tex", sep="/"),  
+                height=3, width=4.75, standAlone=F)
+  par(mar=c(3,3,0.25,0.25), mgp=c(1.25,0.25,0), las=1, tck=0.01)
+  plot(conc ~ y3, data=data.elisa, subset=conc!=0, xlab="$rOD$",
+       ylab="MC Concentration ($\\mu$g/L)", type="n")
+  for (i in 1:21)
+      lines(seq(0.1,1.1,,100), exp(b0[i]+b1[i]*seq(0.1,1.1,,100)), 
+           col="gray")
+  points(data.elisa$y3, data.elisa$conc, pch=16, cex=0.75)
+  dev.off()
+  
+#+END_SRC
+
+* Bayesian Hierarchical Model 
+
+BHM is implemented using the R function \texttt{lmer} from package
+\texttt{lme4}:
+#+NAME: lmer
+#+BEGIN_SRC R :export both :results silent
+     all.lmer <- lmer(log(conc) ~ y3 + (1+y3|Tests) , data=data.elisa, 
+                      subset=conc!=0)
+     a0 <- fixef(all.lmer)[1] + ranef(all.lmer)[[1]][,1]
+     a1 <- fixef(all.lmer)[2] + ranef(all.lmer)[[1]][,2]
+  
+  ## the observation that shut down Toledo's drinking water:
+     exp(fixef(all.lmer)[1]+fixef(all.lmer)[2]*0.261)
+  
+    tikz(file=paste(plotDIR, "simLMer.tex", sep="/"), 
+         height=3, width=4.75, standAlone=F)
+    par(mar=c(3,3,0.25,0.25), mgp=c(1.25,0.25,0), las=1, tck=0.01)
+    plot(conc ~ y3, data=data.elisa, subset=conc!=0, xlab="$rOD$", 
+         ylab="MC Concentration ($\\mu$g/L)", type="n")
+    for (i in 1:21)
+        lines(seq(0.1,1.1,,100), exp(a0[i]+a1[i]*seq(0.1,1.1,,100)),
+              col=grey(0.5))
+        lines(seq(0.1,1.1,,100), 
+              exp(fixef(all.lmer)[1]+fixef(all.lmer)[2]*seq(0.1,1.1,,100)),
+              lwd=3)
+    points(data.elisa$y3, data.elisa$conc, pch=16, cex=0.75)
+    dev.off()
+#+END_SRC
+
+* Toledo's nonlinear model
+
+#+NAME: Nonlinear model
+#+begin_src R :export both :results silent
+
+  ## calibration data 8/1/2014 4:36PM
+
+#+begin_src R :export both :results silent
+  stdConc8.1<- rep(c(0,0.167,0.444,1.11,2.22,5.55), each=2)
+  Abs8.1.0<-c(1.082,1.052,0.834,0.840,0.625,0.630,
+              0.379,0.416,0.28,0.296,0.214,0.218)
+  Abs8.1.1<-c(1.265,1.153,0.94,0.856,0.591,0.643,
+              0.454,0.442,0.454,0.447,0.291,0.29)
+  Abs8.1.2<-c(1.051,1.143,0.679,0.936,0.657,0.662,
+              0.464,0.429,0.32,0.35,0.241,0.263)
+  Abs8.2.0<-c(1.139,1.05,0.877,0.914,0.627,0.705,
+              0.498,0.495,0.289,0.321,0.214,0.231)
+  Abs8.2.1<-c(1.153,1.149,0.947,0.896,0.627,0.656,
+              0.465,0.435,0.33,0.328,0.218,0.226)
+  Abs8.2.2<-c(1.124,1.109,0.879,0.838,0.61,0.611,
+              0.421,0.428,0.297,0.308,0.19,0.203)
+#+end_src
+
+** Fitting the nonlinear model in R
+
+Although in their report issued on August 4, 2014 \footnote{\url{http://www.toledoblade.com/attachment/2014/08/04/72-page-preliminary-study-from-the-City-of-Toledo-on-water-crisis.pdf}}
+City of Toledo suggested that they used a log-transformed
+concentration for fitting the model, they apparently only used
+log-transformation for plotting.  The fitted model used concentration:
+\[
+Abs = D + \frac{A-D}{1+(StdConc/C)^B} + \varepsilon
+\]
+All 6 standard concentrations were used.  The estimated parameters
+using the following code are
+the same as reported in the August 4 report.  
+
+#+begin_src R :export both :results silent
+    
+    toledo <- data.frame(stdConc=rep(stdConc8.1, 6),
+                         Abs=c(Abs8.1.0,Abs8.1.1,Abs8.1.2,
+                               Abs8.2.0,Abs8.2.1,Abs8.2.2),
+                         Test=rep(1:6, each=12))
+    toledo1 <- toledo[toledo$stdConc>0,]
+    
+    TM1 <- nls(Abs ~ (A-D)/(1+(stdConc/C)^B)+D,
+               control=list(maxiter=200), data=toledo[toledo$Test==1,],
+               start=list(A=0.16,B=-1.12,C=0.45,D=1.06))
+    TM2 <- nls(Abs ~ (A-D)/(1+(stdConc/C)^B)+D, 
+               control=list(maxiter=200), data=toledo[toledo$Test==2,],
+               start=list(A=0.16,B=-1.12,C=0.45,D=1.06))
+    TM3 <- nls(Abs ~ (A-D)/(1+(stdConc/C)^B)+D, 
+               control=list(maxiter=200), data=toledo[toledo$Test==3,],
+               start=list(A=0.16,B=-1.12,C=0.45,D=1.06))
+    TM4 <- nls(Abs ~ (A-D)/(1+(stdConc/C)^B)+D, 
+               control=list(maxiter=200), data=toledo[toledo$Test==4,],
+               start=list(A=0.16,B=-1.12,C=0.45,D=1.06))
+    TM5 <- nls(Abs ~ (A-D)/(1+(stdConc/C)^B)+D, 
+               control=list(maxiter=200), data=toledo[toledo$Test==5,],
+               start=list(A=0.16,B=-1.12,C=0.45,D=1.06))
+    TM6 <- nls(Abs ~ (A-D)/(1+(stdConc/C)^B)+D, 
+               control=list(maxiter=200), data=toledo[toledo$Test==6,],
+               start=list(A=0.16,B=-1.12,C=0.45,D=1.06))
+    
+    sim.nls <- function (object, n.sims=100){
+        # sim.nls:  get posterior simulations of sigma and beta from an nls object
+        #           modified from the function sim in package arm.  The following
+        #           are verbatim from the initial sim function:
+        # Arguments:
+        #
+        #     object:  the output of a call to "nls"
+        #              with n data points and k predictors
+        #     n.sims:  number of independent simulation draws to create
+        #
+        # Output is a list (sigma.sim, beta.sim):
+        #
+        #     sigma.sim:  vector of n.sims random draws of sigma
+        #       (for glm's, this just returns a vector of 1's or else of the
+        #       square root of the overdispersion parameter if that is in the model)
+        #     beta.sim:  matrix (dimensions n.sims x k) of n.sims random draws of beta
+        #
+    
+        object.class <- class(object)[[1]]
+        if (object.class!="nls") stop("not a nls object")
+    
+        summ <- summary (object)
+        coef <- summ$coef[,1:2,drop=FALSE]
+        dimnames(coef)[[2]] <- c("coef.est","coef.sd")
+        sigma.hat <- summ$sigma
+        beta.hat <- coef[,1]
+        V.beta <- summ$cov.unscaled
+        n <- summ$df[1] + summ$df[2]
+        k <- summ$df[1]
+        sigma <- rep (NA, n.sims)
+        beta <- array (NA, c(n.sims,k))
+        dimnames(beta) <- list (NULL, names(beta.hat))
+        for (s in 1:n.sims){
+          sigma[s] <- sigma.hat*sqrt((n-k)/rchisq(1,n-k))
+          beta[s,] <- mvrnorm (1, beta.hat, V.beta*sigma[s]^2)
+        }
+        return (list (beta=beta, sigma=sigma))
+      }
+    
+    test1.sim <- sim.nls(TM1, 4000)
+    test1.beta <- rvsims(test1.sim$beta)
+    test1.sigma <- rvsims(test1.sim$sigma)
+    test1.coef <- coef(TM1)
+    test1.pred <-
+        summary(rvnorm(mean=(test1.beta[1]-test1.beta[4])/
+                        (1+(seq(0,5.55,,500)/test1.beta[3])^test1.beta[2])+
+                        test1.beta[4], sd=test1.sigma))
+    
+    test3.sim <- sim.nls(TM3, 4000)
+    test3.beta <- rvsims(test3.sim$beta)
+    test3.sigma <- rvsims(test3.sim$sigma)
+    test3.coef <- coef(TM3)
+    test3.pred <-
+        summary(rvnorm(mean=(test3.beta[1]-test3.beta[4])/
+                         (1+(seq(0,5.55,,500)/test3.beta[3])^test3.beta[2])+
+                         test3.beta[4], sd=test3.sigma))
+    
+    tikz(file=paste(plotDIR, "tolUncas.tex", sep="/"), 
+         height=6.5, width=4.75, standAlone=F)
+    par(mfrow=c(3,1), mgp=c(1.25,0.25,0), las=1, tck=0.01)
+    par(mar=c(0,3,3,2.5))
+    plot( Abs ~ stdConc, type="n", data=toledo, xlab=" ",
+         ylab=" ", axes=F)
+    polygon(x=c(seq(0,5.55,,500), rev(seq(0,5.55,,500))),
+            y=c(test1.pred[,4],rev(test1.pred[,8])), 
+            col=grey(0.75), border=NA) 
+    polygon(x=c(seq(0,5.55,,500), rev(seq(0,5.55,,500))),
+            y=c(test1.pred[,5],rev(test1.pred[,7])), 
+            col=grey(0.5), border=NA) 
+    curve((test1.coef[1]-test1.coef[4])/(1+(x/test1.coef[3])^test1.coef[2])+
+           test1.coef[4], add=T)
+    points(toledo$stdConc[toledo$Test==1],
+           toledo$Abs[toledo$Test==1], cex=0.75, pch=16)
+    axis(3)
+    axis(4)
+    box()
+    text(5, 1.125, "(a)")
+    abline(h=0.35, col=gray(0.4), lty=5)
+    abline(v=1.5, col=gray(0.4), lty=5)
+    par(mar=c(1.5,3,1.5,2.5))
+    plot( Abs ~ stdConc, type="n", data=toledo, xlab=" ",
+         ylab="OD", axes=F)
+    polygon(x=c(seq(0,5.55,,500), rev(seq(0,5.55,,500))),
+            y=c(test3.pred[,4],rev(test3.pred[,8])), 
+            col=grey(0.75), border=NA) 
+    polygon(x=c(seq(0,5.55,,500), rev(seq(0,5.55,,500))),
+            y=c(test3.pred[,5],rev(test3.pred[,7])),
+            col=grey(0.5), border=NA) 
+    curve((test3.coef[1]-test3.coef[4])/(1+(x/test3.coef[3])^test3.coef[2])+
+              test3.coef[4], add=T)
+    points(toledo$stdConc[toledo$Test==3],
+           toledo$Abs[toledo$Test==3], cex=0.75, pch=16)
+    axis(2)
+    box()
+    text(5, 1.125, "(b)")
+    
+    par(mar=c(3,3,0,2.5))
+    plot( Abs ~ stdConc, type="p", data=toledo, 
+          xlab="MC Concentration ($\\mu$g/L)",
+          ylab=" ", axes=F)
+    aa <- coef(TM1)
+    curve((aa[1]-aa[4])/(1+(x/aa[3])^aa[2])+aa[4], add=T, lwd=2)
+    aa <- coef(TM2)
+    curve((aa[1]-aa[4])/(1+(x/aa[3])^aa[2])+aa[4], add=T, col=grey(0.5))
+    aa <- coef(TM3)
+    curve((aa[1]-aa[4])/(1+(x/aa[3])^aa[2])+aa[4], add=T, col=grey(0.5))
+    aa <- coef(TM4)
+    curve((aa[1]-aa[4])/(1+(x/aa[3])^aa[2])+aa[4], add=T, col=grey(0.5))
+    aa <- coef(TM5)
+    curve((aa[1]-aa[4])/(1+(x/aa[3])^aa[2])+aa[4], add=T, col=grey(0.5))
+    aa <- coef(TM6)
+    curve((aa[1]-aa[4])/(1+(x/aa[3])^aa[2])+aa[4], add=T, col=grey(0.5))
+    text(5, 1.125, "(c)")
+    axis(1)
+    axis(4)
+    box()
+    
+    dev.off()
+    
+  ## TOC art (recovered after Emacs crash):
+    png(file=paste(plotDIR, "TOCart.png", sep="/"), 
+         height=8.5, width=4.75, units="cm", bg="transparent")
+    par(mfrow=c(1,3), mgp=c(1.5,0.125,0), las=1, tck=0.01)
+    par(mar=c(3,3,1,0))
+    plot( Abs ~ stdConc, type="n", data=toledo, xlab=" ",
+         axes=F, ylab="OD", col.lab="cyan", cex.lab=1.5)
+    polygon(x=c(seq(0,5.55,,500), rev(seq(0,5.55,,500))),
+            y=c(test1.pred[,4],rev(test1.pred[,8])), 
+            col="skyblue", border=NA) 
+    polygon(x=c(seq(0,5.55,,500), rev(seq(0,5.55,,500))),
+            y=c(test1.pred[,5],rev(test1.pred[,7])), 
+            col="orange", border=NA) 
+    curve((test1.coef[1]-test1.coef[4])/(1+(x/test1.coef[3])^test1.coef[2])+
+           test1.coef[4], add=T, col="blue")
+    points(toledo$stdConc[toledo$Test==1],
+           toledo$Abs[toledo$Test==1], col="red")
+    axis(1)
+    axis(2)
+    box()
+    par(mar=c(3,1.5,1, 1.5))
+    plot( Abs ~ stdConc, type="n", data=toledo, ylab=" ",
+         xlab=substitute(paste("MC Concentration (", mu, "g/L)",
+         sep="")), axes=F, col.lab="cyan", cex.lab=1.5)
+    polygon(x=c(seq(0,5.55,,500), rev(seq(0,5.55,,500))),
+            y=c(test3.pred[,4],rev(test3.pred[,8])), 
+            col="skyblue", border=NA) 
+    polygon(x=c(seq(0,5.55,,500), rev(seq(0,5.55,,500))),
+            y=c(test3.pred[,5],rev(test3.pred[,7])),
+            col="orange", border=NA) 
+    curve((test3.coef[1]-test3.coef[4])/(1+(x/test3.coef[3])^test3.coef[2])+
+              test3.coef[4], col="blue", add=T)
+    points(toledo$stdConc[toledo$Test==3],
+           toledo$Abs[toledo$Test==3], col="red")
+    axis(1)
+    box()
+    
+    par(mar=c(3,0,1,3))
+    plot( Abs ~ stdConc, type="p", data=toledo, 
+          xlab=" ",
+          ylab=" ", axes=F)
+    aa <- coef(TM1)
+    curve((aa[1]-aa[4])/(1+(x/aa[3])^aa[2])+aa[4], add=T, lwd=2)
+    aa <- coef(TM2)
+    curve((aa[1]-aa[4])/(1+(x/aa[3])^aa[2])+aa[4], add=T, col="blue")
+    aa <- coef(TM3)
+    curve((aa[1]-aa[4])/(1+(x/aa[3])^aa[2])+aa[4], add=T, col="blue")
+    aa <- coef(TM4)
+    curve((aa[1]-aa[4])/(1+(x/aa[3])^aa[2])+aa[4], add=T, col="blue")
+    aa <- coef(TM5)
+    curve((aa[1]-aa[4])/(1+(x/aa[3])^aa[2])+aa[4], add=T, col="blue")
+    aa <- coef(TM6)
+    curve((aa[1]-aa[4])/(1+(x/aa[3])^aa[2])+aa[4], add=T, col="blue")
+    axis(1)
+    axis(4)
+    box()
+    
+    dev.off()
+   
+#+end_src
+
+
+
+** Predicting the August 1 MC concentrations using BHM
+
+Although Toledo used a different model, we use the log-linear model
+and the BHM to reanalyze the data as an illustration for partially
+pooling data from multiple tests.  The Toledo Water Department (TWD) made the test data conducted during the water crisis available.  We
+have requested data from other ELISA tests, but TWD did not respond.
+
+#+begin_src R :export both :results silent 
+  ODaug01 <- as.vector(by(Abs8.1.0, stdConc8.1, mean))
+  aug012014 <- data.frame(rOD = ODaug01/ODaug01[1], 
+                          StdC=c(0,0.167,0.444,1.11,2.22,5.55))
+  tap8.1 <- c(0.271, 0.286)  ## triggered the No-Drink advisory
+  raw1 <- c(0.693, 0.645)    ## raw water 1
+  raw2 <- c(0.883,0.933)     ## raw water 2
+  control1 <- c(0.489, 0.470)## positive control
+  tap7.29 <- c(1.002, 1.013) ## tap from 7/29
+  
+  tap.rOD <- mean(tap8.1)/ODaug01[1]
+  raw1.rOD <- mean(raw1)/ODaug01[1]
+  raw2.rOD <- mean(raw2)/ODaug01[1]
+  cont.rOD <- mean(control1)/ODaug01[1]
+  tap2.rOD <- mean(tap7.29)/ODaug01[1]
+  
+  ## using the nonlinear model
+  test1.predAug01 <-
+        summary(exp(rvnorm(mean=(test1.beta[1]-test1.beta[4])/
+                           (1+(tap8.1/test1.beta[3])^test1.beta[2])+
+                               test1.beta[4], sd=test1.sigma)))
+  
+  Tolaug01.lm <- lm(log(StdC) ~ rOD, data=aug012014, subset=StdC!=0)
+  summary(Tolaug01.lm)
+  
+  exp(predict(Tolaug01.lm, newdata=data.frame(rOD=0.261)))
+  
+  Tolaug01lm.sim <- posterior(Tolaug01.lm)
+  coef.Tolaug01 <- coef(Tolaug01.lm)
+  
+  Tolaug01.predM <- 
+      summary(exp(Tolaug01lm.sim$beta[1]+Tolaug01lm.sim$beta[2]*tap.rOD))
+  Tolaug01.pred <- 
+      summary(exp(rvnorm(mean=Tolaug01lm.sim$beta[1]+
+                              Tolaug01lm.sim$beta[2]*tap.rOD,
+                         sd=Tolaug01lm.sim$sigma)))
+  Tolaug01.pred[c(4, 6, 8)]
+  Pr(exp(rvnorm(mean=Tolaug01lm.sim$beta[1]+
+                     Tolaug01lm.sim$beta[2]*tap.rOD,
+                sd=Tolaug01lm.sim$sigma)) > 1)
+  ## the BHM appraoch
+  tol.BHM <- data.frame(StdC=c(data.elisa$conc, aug012014$StdC),
+                        rOD=c(data.elisa$y3, aug012014$rOD),
+                        Test=c(data.elisa$Test, rep("Toledo", 6)))
+  tolLM  <- lm(log(StdC) ~ rOD * Test -1 -rOD, data=tol.BHM, subset=StdC!=0)
+  tolBHM <- lmer(log(StdC) ~ rOD+(1+rOD|Test), data=tol.BHM, subset=StdC!=0)
+  simTolBHM <- sim(tolBHM, n.sims=4000)
+  coef.sim <- rvsims(as.matrix(data.frame(fix.Int=simTolBHM@fixef[,1],
+                               fix.slp=simTolBHM@fixef[,2],
+                               ran.Int=simTolBHM@ranef$Test[,"Toledo",1],
+                               ran.slp=simTolBHM@ranef$Test[,"Toledo",2],
+                               sigma=simTolBHM@sigma)))
+  
+  tolPred.coef <- c(coef.sim[1]+coef.sim[3], coef.sim[2]+coef.sim[4])
+  
+  ## 95CI for the mean -- BHM Toledo
+  summary(exp(tolPred.coef[1]+tolPred.coef[2]*tap.rOD))[c(5,7,9)]
+  aug01BHM.pred <- summary(exp(rvnorm(mean=tolPred.coef[1]+
+                                           tolPred.coef[2]*tap.rOD,
+                                      sd=coef.sim[5])))
+  aug01BHM.predM <- summary(exp(tolPred.coef[1]+
+                                tolPred.coef[2]*tap.rOD))
+  
+  meanBHM <- summary(exp(coef.sim[1]+coef.sim[2]*tap.rOD))
+  predBHM <- summary(exp(rvnorm(mean=coef.sim[1]+coef.sim[2]*tap.rOD,
+                                      sd=coef.sim[5])))
+  predBHM[c(4, 6, 8)]
+  
+  
+  toledo.coef <- coef(Tolaug01.lm)
+  tikz(file=paste(plotDIR, "TolComp.tex", sep="/"), 
+       height=3, width=4.75, standAlone=F)
+  par(mar=c(3,3,0.5,0.25), mgp=c(1.25,0.25,0), las=1, tck=0.01)
+  plot(StdC ~ rOD, data=aug012014[aug012014$rOD!=1,],
+       xlab="$rOD$", xlim=range(aug012014$rOD),
+       ylab="MC Concentration ($\\mu$g/L)")
+  curve(exp(toledo.coef[1] + toledo.coef[2]*x), add=T)
+  a0 <- fixef(tolBHM)[1] + ranef(tolBHM)[[1]][21,1]
+  a1 <- fixef(tolBHM)[2] + ranef(tolBHM)[[1]][21,2]
+  curve(exp(a0 + a1*x), add=T, lty=2)
+  curve(exp(fixef(tolBHM)[1]+fixef(tolBHM)[2]*x), add=T, lty=3)
+  points(tap.rOD, exp(a0 + a1*tap.rOD), pch=16)
+  points(tap.rOD, exp(toledo.coef[1] + toledo.coef[2]*tap.rOD), pch=16)
+  points(tap.rOD, exp(fixef(tolBHM)[1]+fixef(tolBHM)[2]*tap.rOD), pch=16)
+  abline(h=1, col=gray(0.75), lty=4)
+  dev.off()
+  
+  
+  ## probabilities
+   ## MC > 1
+  Tol.tap1<-Pr(rvnorm(mean=Tolaug01lm.sim$beta[1]+
+                           Tolaug01lm.sim$beta[2]*tap.rOD,
+                      sd=Tolaug01lm.sim$sigma) > 0)
+  Tol.raw1 <- Pr (rvnorm(mean=Tolaug01lm.sim$beta[1]+
+                              Tolaug01lm.sim$beta[2]*raw1.rOD,
+                         sd=Tolaug01lm.sim$sigma) > 0)
+  Tol.raw2 <- Pr (rvnorm(mean=Tolaug01lm.sim$beta[1]+
+                              Tolaug01lm.sim$beta[2]*raw2.rOD,
+                         sd=Tolaug01lm.sim$sigma) > 0)
+  Tol.cont <- Pr (rvnorm(mean=Tolaug01lm.sim$beta[1]+
+                              Tolaug01lm.sim$beta[2]*cont.rOD,
+                         sd=Tolaug01lm.sim$sigma) > 0)
+  Tol.tap2 <- Pr (rvnorm(mean=Tolaug01lm.sim$beta[1]+
+                              Tolaug01lm.sim$beta[2]*tap2.rOD,
+                         sd=Tolaug01lm.sim$sigma) > 0)
+  
+  Tol.tap1B <- Pr (rvnorm(mean=tolPred.coef[1]+tolPred.coef[2]*tap.rOD,
+                         sd=coef.sim[5]) > 0)
+  Tol.raw1B <- Pr (rvnorm(mean=tolPred.coef[1]+tolPred.coef[2]*raw1.rOD,
+                              sd=coef.sim[5]) > 0)
+  Tol.raw2B <- Pr (rvnorm(mean=tolPred.coef[1]+tolPred.coef[2]*raw2.rOD,
+                              sd=coef.sim[5]) > 0)
+  Tol.contB <- Pr (rvnorm(mean=tolPred.coef[1]+tolPred.coef[2]*cont.rOD,
+                              sd=coef.sim[5]) > 0)
+  Tol.tap2B <- Pr (rvnorm(mean=tolPred.coef[1]+tolPred.coef[2]*tap2.rOD,
+                              sd=coef.sim[5]) > 0)
+   ## MC > 0.3
+  Tol.tap1.0.3<-Pr(rvnorm(mean=Tolaug01lm.sim$beta[1]+
+                               Tolaug01lm.sim$beta[2]*tap.rOD,
+                          sd=Tolaug01lm.sim$sigma) > log(0.3))
+  Tol.raw1.0.3<-Pr(rvnorm(mean=Tolaug01lm.sim$beta[1]+
+                               Tolaug01lm.sim$beta[2]*raw1.rOD,
+                          sd=Tolaug01lm.sim$sigma) > log(0.3))
+  Tol.raw2.0.3<-Pr(rvnorm(mean=Tolaug01lm.sim$beta[1]+
+                               Tolaug01lm.sim$beta[2]*raw2.rOD,
+                          sd=Tolaug01lm.sim$sigma) > log(0.3))
+  Tol.cont.0.3<-Pr(rvnorm(mean=Tolaug01lm.sim$beta[1]+
+                               Tolaug01lm.sim$beta[2]*cont.rOD,
+                          sd=Tolaug01lm.sim$sigma) > log(0.3))
+  Tol.tap2.0.3<-Pr(rvnorm(mean=Tolaug01lm.sim$beta[1]+
+                               Tolaug01lm.sim$beta[2]*tap2.rOD,
+                          sd=Tolaug01lm.sim$sigma) > log(0.3))
+  
+  Tol.tap1B.0.3<-Pr(rvnorm(mean=tolPred.coef[1]+tolPred.coef[2]*tap.rOD,
+                           sd=coef.sim[5]) > log(0.3))
+  Tol.raw1B.0.3<-Pr(rvnorm(mean=tolPred.coef[1]+tolPred.coef[2]*raw1.rOD,
+                           sd=coef.sim[5]) > log(0.3))
+  Tol.raw2B.0.3<-Pr(rvnorm(mean=tolPred.coef[1]+tolPred.coef[2]*raw2.rOD,
+                           sd=coef.sim[5]) > log(0.3))
+  Tol.contB.0.3<-Pr(rvnorm(mean=tolPred.coef[1]+tolPred.coef[2]*cont.rOD,
+                           sd=coef.sim[5]) > log(0.3))
+  Tol.tap2B.0.3<-Pr(rvnorm(mean=tolPred.coef[1]+tolPred.coef[2]*tap2.rOD,
+                           sd=coef.sim[5]) > log(0.3))
+   ## MC > 1.6
+  Tol.tap1.1.6<-Pr(rvnorm(mean=Tolaug01lm.sim$beta[1]+
+                               Tolaug01lm.sim$beta[2]*tap.rOD,
+                          sd=Tolaug01lm.sim$sigma) > log(1.6))
+  Tol.raw1.1.6<-Pr(rvnorm(mean=Tolaug01lm.sim$beta[1]+
+                               Tolaug01lm.sim$beta[2]*raw1.rOD,
+                          sd=Tolaug01lm.sim$sigma) > log(1.6))
+  Tol.raw2.1.6<-Pr(rvnorm(mean=Tolaug01lm.sim$beta[1]+
+                               Tolaug01lm.sim$beta[2]*raw2.rOD,
+                          sd=Tolaug01lm.sim$sigma) > log(1.6))
+  Tol.cont.1.6<-Pr(rvnorm(mean=Tolaug01lm.sim$beta[1]+
+                               Tolaug01lm.sim$beta[2]*cont.rOD,
+                          sd=Tolaug01lm.sim$sigma) > log(1.6))
+  Tol.tap2.1.6<-Pr(rvnorm(mean=Tolaug01lm.sim$beta[1]+
+                               Tolaug01lm.sim$beta[2]*tap2.rOD,
+                          sd=Tolaug01lm.sim$sigma) > log(1.6))
+  
+  Tol.tap1B.1.6<-Pr(rvnorm(mean=tolPred.coef[1]+tolPred.coef[2]*tap.rOD,
+                           sd=coef.sim[5]) > log(1.6))
+  Tol.raw1B.1.6<-Pr(rvnorm(mean=tolPred.coef[1]+tolPred.coef[2]*raw1.rOD,
+                           sd=coef.sim[5]) > log(1.6))
+  Tol.raw2B.1.6<-Pr(rvnorm(mean=tolPred.coef[1]+tolPred.coef[2]*raw2.rOD,
+                           sd=coef.sim[5]) > log(1.6))
+  Tol.contB.1.6<-Pr(rvnorm(mean=tolPred.coef[1]+tolPred.coef[2]*cont.rOD,
+                           sd=coef.sim[5]) > log(1.6))
+  Tol.tap2B.1.6<-Pr(rvnorm(mean=tolPred.coef[1]+tolPred.coef[2]*tap2.rOD,
+                           sd=coef.sim[5]) > log(1.6))
+  
+  ## prediction based on Toledo model only
+  Tolaug01.predM.log<-summary(Tolaug01lm.sim$beta[1]+
+                              Tolaug01lm.sim$beta[2]*tap.rOD)
+  Tolaug01.pred.log<-summary(rvnorm(mean=Tolaug01lm.sim$beta[1]+
+                                         Tolaug01lm.sim$beta[2]*tap.rOD,
+                                    sd=Tolaug01lm.sim$sigma))
+  Tolaug01.rawM.log <- summary(Tolaug01lm.sim$beta[1]+
+                               Tolaug01lm.sim$beta[2]*raw1.rOD)
+  Tolaug01.raw.log <- summary(rvnorm(mean=Tolaug01lm.sim$beta[1]+
+                                          Tolaug01lm.sim$beta[2]*raw1.rOD,
+                                     sd=Tolaug01lm.sim$sigma))
+  Tolaug01.raw2M.log<- summary(Tolaug01lm.sim$beta[1]+
+                               Tolaug01lm.sim$beta[2]*raw2.rOD)
+  Tolaug01.raw2.log<-summary(rvnorm(mean=Tolaug01lm.sim$beta[1]+
+                                         Tolaug01lm.sim$beta[2]*raw2.rOD,
+                                    sd=Tolaug01lm.sim$sigma))
+  Tolaug01.contM.log <-summary(Tolaug01lm.sim$beta[1]+
+                               Tolaug01lm.sim$beta[2]*cont.rOD)
+  Tolaug01.cont.log <-summary(rvnorm(mean=Tolaug01lm.sim$beta[1]+
+                                          Tolaug01lm.sim$beta[2]*cont.rOD,
+                                     sd=Tolaug01lm.sim$sigma))
+  Tolaug01.tap2M.log <-summary(Tolaug01lm.sim$beta[1]+
+                               Tolaug01lm.sim$beta[2]*tap2.rOD)
+  Tolaug01.tap2.log <-summary(rvnorm(mean=Tolaug01lm.sim$beta[1]+
+                                          Tolaug01lm.sim$beta[2]*tap2.rOD,
+                                     sd=Tolaug01lm.sim$sigma))
+  
+  ## prediction based on test-specific curve (BHM)
+  aug01BHM.pred.log <- summary(rvnorm(mean=tolPred.coef[1]+
+                                           tolPred.coef[2]*tap.rOD,
+                                      sd=coef.sim[5]))
+  aug01BHM.predM.log <- summary(tolPred.coef[1]+tolPred.coef[2]*tap.rOD)
+  aug01BHM.raw.log <- summary(rvnorm(mean=tolPred.coef[1]+
+                                          tolPred.coef[2]*raw1.rOD,
+                                     sd=coef.sim[5]))
+  aug01BHM.rawM.log <- summary(tolPred.coef[1]+tolPred.coef[2]*raw1.rOD)
+  aug01BHM.raw2.log <- summary(rvnorm(mean=tolPred.coef[1]+
+                                           tolPred.coef[2]*raw2.rOD,
+                                      sd=coef.sim[5]))
+  aug01BHM.raw2M.log <- summary(tolPred.coef[1]+tolPred.coef[2]*raw2.rOD)
+  aug01BHM.cont.log <- summary(rvnorm(mean=tolPred.coef[1]+
+                                           tolPred.coef[2]*cont.rOD,
+                                      sd=coef.sim[5]))
+  aug01BHM.contM.log <- summary(tolPred.coef[1]+tolPred.coef[2]*cont.rOD)
+  aug01BHM.tap2.log <- summary(rvnorm(mean=tolPred.coef[1]+
+                                           tolPred.coef[2]*tap2.rOD,
+                                      sd=coef.sim[5]))
+  aug01BHM.tap2M.log <- summary(tolPred.coef[1]+tolPred.coef[2]*tap2.rOD)
+  
+  ## prediction based on BHM mean
+  meanBHM.log <- summary(coef.sim[1]+coef.sim[2]*tap.rOD)
+  predBHM.log <- summary(rvnorm(mean=coef.sim[1]+coef.sim[2]*tap.rOD,
+                                sd=coef.sim[5]))
+  tap2MBHM.log <- summary(coef.sim[1]+coef.sim[2]*tap2.rOD)
+  tap2BHM.log <- summary(rvnorm(mean=coef.sim[1]+coef.sim[2]*tap2.rOD,
+                                sd=coef.sim[5]))
+  contMBHM.log <- summary(coef.sim[1]+coef.sim[2]*cont.rOD)
+  contBHM.log <- summary(rvnorm(mean=coef.sim[1]+coef.sim[2]*cont.rOD,
+                                sd=coef.sim[5]))
+  rawMBHM.log <- summary(coef.sim[1]+coef.sim[2]*raw1.rOD)
+  rawBHM.log <- summary(rvnorm(mean=coef.sim[1]+coef.sim[2]*raw1.rOD,
+                               sd=coef.sim[5]))
+  raw2MBHM.log <- summary(coef.sim[1]+coef.sim[2]*raw2.rOD)
+  raw2BHM.log <- summary(rvnorm(mean=coef.sim[1]+coef.sim[2]*raw2.rOD,
+                                sd=coef.sim[5]))
+  
+  tikz(file=paste(plotDIR,"TolComp2.tex",sep="/"), 
+           height=3.5, width=5, standAlone=F)
+  par(mar=c(3.5,4, 4.5, 1.), mgp=c(1.75,0.125,0), las=1, tck=0.01)
+  plot(c(0,1), c(0,1), type="n", xlim=c(0.2,1), 
+       ylim=log(c(0.01,10)), axes=F,
+       xlab="$rOD$", ylab="MC Concentration ($\\mu$g/L)")
+  
+  segments(x0=tap.rOD-0.01, y0=Tolaug01.pred.log[,4], 
+           y1=Tolaug01.pred.log[,8])
+  segments(x0=tap.rOD-0.01, y0=Tolaug01.predM.log[,5], 
+           y1=Tolaug01.predM.log[,9], lwd=3)
+  segments(x0=tap.rOD, y0=aug01BHM.pred.log[,4], 
+           y1=aug01BHM.pred.log[,8], lty=2)
+  segments(x0=tap.rOD, y0=aug01BHM.predM.log[,5], 
+           y1=aug01BHM.predM.log[,9], lwd=3)
+  segments(x0=tap.rOD+0.01, y0=predBHM.log[,4],
+           y1=predBHM.log[,8], lty=3)
+  segments(x0=tap.rOD+0.01, y0=meanBHM.log[,5], 
+           y1=meanBHM.log[,9], lwd=3)
+  points(tap.rOD, a0 + a1*tap.rOD, pch=16)
+  points(tap.rOD-0.01, toledo.coef[1] + toledo.coef[2]*tap.rOD,
+         pch=16)
+  points(tap.rOD+0.01, fixef(tolBHM)[1]+fixef(tolBHM)[2]*tap.rOD,
+         pch=16)
+  
+  segments(x0=tap2.rOD-0.01, y0=Tolaug01.tap2.log[,4], 
+           y1=Tolaug01.tap2.log[,8])
+  segments(x0=tap2.rOD-0.01, y0=Tolaug01.tap2M.log[,5], 
+           y1=Tolaug01.tap2M.log[,9], lwd=3)
+  segments(x0=tap2.rOD, y0=aug01BHM.tap2.log[,4],
+           y1=aug01BHM.tap2.log[,8], lty=2)
+  segments(x0=tap2.rOD, y0=aug01BHM.tap2M.log[,5],
+           y1=aug01BHM.tap2M.log[,9], lwd=3)
+  segments(x0=tap2.rOD+0.01, y0=tap2BHM.log[,4],
+           y1=tap2BHM.log[,8], lty=3)
+  segments(x0=tap2.rOD+0.01, y0=tap2MBHM.log[,5], 
+           y1=tap2MBHM.log[,9], lwd=3)
+  points(tap2.rOD, a0 + a1*tap2.rOD, pch=16)
+  points(tap2.rOD-0.01, toledo.coef[1] + toledo.coef[2]*tap2.rOD,
+         pch=16)
+  points(tap2.rOD+0.01, fixef(tolBHM)[1]+fixef(tolBHM)[2]*tap2.rOD, 
+         pch=16)
+  
+  segments(x0=raw1.rOD-0.01, y0=Tolaug01.raw.log[,4], 
+           y1=Tolaug01.raw.log[,8])
+  segments(x0=raw1.rOD-0.01, y0=Tolaug01.rawM.log[,5], 
+           y1=Tolaug01.rawM.log[,9], lwd=3)
+  segments(x0=raw1.rOD, y0=aug01BHM.raw.log[,4],
+           y1=aug01BHM.raw.log[,8],
+           lty=2)
+  segments(x0=raw1.rOD, y0=aug01BHM.rawM.log[,5],
+           y1=aug01BHM.rawM.log[,9],
+           lwd=3)
+  segments(x0=raw1.rOD+0.01, y0=rawBHM.log[,4], y1=rawBHM.log[,8], 
+           lty=3)
+  segments(x0=raw1.rOD+0.01, y0=rawMBHM.log[,5], y1=rawMBHM.log[,9],
+           lwd=3)
+  points(raw1.rOD, a0 + a1*raw1.rOD, pch=16)
+  points(raw1.rOD-0.01, toledo.coef[1] + toledo.coef[2]*raw1.rOD, 
+         pch=16)
+  points(raw1.rOD+0.01, fixef(tolBHM)[1]+fixef(tolBHM)[2]*raw1.rOD, 
+         pch=16)
+  
+  segments(x0=raw2.rOD-0.01, y0=Tolaug01.raw2.log[,4], 
+           y1=Tolaug01.raw2.log[,8])
+  segments(x0=raw2.rOD-0.01, y0=Tolaug01.raw2M.log[,5], 
+           y1=Tolaug01.raw2M.log[,9], lwd=3)
+  segments(x0=raw2.rOD, y0=aug01BHM.raw2.log[,4], 
+           y1=aug01BHM.raw2.log[,8], lty=2)
+  segments(x0=raw2.rOD, y0=aug01BHM.raw2M.log[,5], 
+           y1=aug01BHM.raw2M.log[,9], lwd=3)
+  segments(x0=raw2.rOD+0.01, y0=raw2BHM.log[,4], 
+           y1=raw2BHM.log[,8], lty=3)
+  segments(x0=raw2.rOD+0.01, y0=raw2MBHM.log[,5], 
+           y1=raw2MBHM.log[,9], lwd=3)
+  points(raw2.rOD, a0 + a1*raw2.rOD, pch=16)
+  points(raw2.rOD-0.01, toledo.coef[1] + toledo.coef[2]*raw2.rOD,
+         pch=16)
+  points(raw2.rOD+0.01, fixef(tolBHM)[1]+fixef(tolBHM)[2]*raw2.rOD, 
+         pch=16)
+  
+  segments(x0=cont.rOD-0.01, y0=Tolaug01.cont.log[,4], 
+           y1=Tolaug01.cont.log[,8])
+  segments(x0=cont.rOD-0.01, y0=Tolaug01.contM.log[,5],
+           y1=Tolaug01.contM.log[,9], lwd=3)
+  segments(x0=cont.rOD, y0=aug01BHM.cont.log[,4],
+           y1=aug01BHM.cont.log[,8],
+           lty=2)
+  segments(x0=cont.rOD, y0=aug01BHM.contM.log[,5],
+           y1=aug01BHM.contM.log[,9],
+           lwd=3)
+  segments(x0=cont.rOD+0.01, y0=contBHM.log[,4], y1=contBHM.log[,8], 
+           lty=3)
+  segments(x0=cont.rOD+0.01, y0=contMBHM.log[,5], y1=contMBHM.log[,9],
+           lwd=3)
+  points(cont.rOD, a0 + a1*cont.rOD, pch=16)
+  points(cont.rOD-0.01, toledo.coef[1] + toledo.coef[2]*cont.rOD, 
+         pch=16)
+  points(cont.rOD+0.01, fixef(tolBHM)[1]+fixef(tolBHM)[2]*cont.rOD,
+         pch=16)
+  
+  abline(h=0, col=gray(0.75))
+  abline(h=log(1.60), col=gray(0.75), lty=3)
+  abline(h=log(0.3), col=gray(0.75), lty=3)
+  axis(1)
+  axis(2, at = log(c(0.01,0.05, 0.1,0.25, 0.5, 1, 2,5,10)),
+  labels=c(0.01,0.05, 0.1,0.25, 0.5, 1, 2,5,10))
+  axis(3, at=c(tap.rOD, raw1.rOD, cont.rOD, raw2.rOD, tap2.rOD), cex=0.75,
+       labels=round(c(Tol.tap1, Tol.raw1, Tol.cont, Tol.raw2,Tol.tap2),
+                    digits=3))
+  axis(3, at=c(tap.rOD, raw1.rOD, cont.rOD, raw2.rOD, tap2.rOD), 
+       cex=0.75,
+       labels=round(c(Tol.tap1B, Tol.raw1B, Tol.contB, Tol.raw2B, Tol.tap2B), 
+                    digits=3),
+       line=2, tck=0.01)
+  box()
+  
+  dev.off()
+  
+  ## table
+  
+  Pr0.3Tol <- c(Tol.tap1.0.3, Tol.raw1.0.3, Tol.raw2.0.3, 
+                Tol.cont.0.3, Tol.tap2.0.3)
+  Pr0.3BHM <- c(Tol.tap1B.0.3, Tol.raw1B.0.3, Tol.raw2B.0.3,
+                Tol.contB.0.3, Tol.tap2B.0.3)
+  
+  Pr1.0Tol <- c(Tol.tap1, Tol.raw1, Tol.raw2, Tol.cont, Tol.tap2)
+  Pr1.0BHM <- c(Tol.tap1B, Tol.raw1B, Tol.raw2B, Tol.contB, Tol.tap2B)
+  
+  Pr1.6Tol <- c(Tol.tap1.1.6, Tol.raw1.1.6, Tol.raw2.1.6, 
+                Tol.cont.1.6, Tol.tap2.1.6)
+  Pr1.6BHM <- c(Tol.tap1B.1.6, Tol.raw1B.1.6, Tol.raw2B.1.6,
+                Tol.contB.1.6, Tol.tap2B.1.6)
+  rODs <- c(tap.rOD, raw1.rOD, raw2.rOD, cont.rOD, tap2.rOD)
+  
+  oo <- order(rODs)
+  round(rbind(rODs[oo], Pr0.3BHM[oo], Pr0.3Tol[oo], Pr1.0BHM[oo], 
+              Pr1.0Tol[oo], Pr1.6BHM[oo], Pr1.6Tol[oo]), 3)
+#+end_src
+
+* Predictive accuracy assessment using WAIC and LOO
+Predictive accuracy of a regression model is often assessed by using
+cross-validation, where the same model is repeatedly fit with a small
+portion of data set aside for assessing the model's predictive
+accuracy.  Cross-validation can be computationally intensive and
+numerically unstable.  In statistics, various information criteria are
+used for approximate a model's leave-one-out predictive accuracy
+(LOO). Because a regression model predicts a distribution for a future
+observation, the predictive accuracy is often measured by the
+predictive probability density.  The larger the density, the more
+accurate the model is.  The measure is often expressed in terms of
+deviance, -2 times log density.  To efficiently approximate the
+predictive deviance, an information criterion uses the deviance of the
+model (-2 log likelihood, or the log density evaluated using data to
+which the model was fit) plus a correction term.  For example, the
+most commonly used information criterion, Akaike Information Criterion
+(AIC) \cite{Akaike.1973), is calculated by the sum of -2
+log-likelihood plus 2 times the number of unknown parameters. AIC is a
+good approximation for linear models, but the correction term is often
+too large for nonlinear models. The Deviance Information Criteria
+(DIC) \citep{Spiegelhalter.etal2002}, was developed for Bayesian
+hierarchical models.  \citet{Gelman.etal2014} compared several
+commonly used information criteria for estimating predictive errors.
+
+For our model assessment, we compare the predictive errors of the
+log-linear regression model fitted to individual test data and the
+predictive error of the BHM by partially pooling data from the 21
+tests.  Although a good approximation for the log-linear model,
+AIC is inappropriate for the BHM.  Based on the recommendation of
+\citet{Gelman.etal2014}, we use the Watanabe-AIC (Watanabe 2010).
+
+WAIC is recently implemented in R package \texttt{loo}, where WAIC and
+LOO are calculated based on a Bayesian regression model fit using Stan
+\citep{Stan}.
+
+** Stan models
+Linear regression model
+# R session lm
+#+NAME:  linear model (no pooling)
+#+BEGIN_SRC R :session *R* :results value
+   # linear regression
+
+  X <- model.matrix(~y3*factor(Tests), data.elisa[data.elisa$conc!=0,])
+  ## Stan model
+  lm.nopool <- "
+  data {
+    int N;
+    int K;
+    vector[N] y;
+    matrix[N,K] X;
+  }
+  parameters {
+    vector[K] b;
+    real<lower=0> sigma;
+  }
+  model {
+    y ~ normal(X * b, sigma);
+  }
+  generated quantities {
+    vector[N] log_lik;
+    for (n in 1:N)
+      log_lik[n] <- normal_log(y[n], X[n] * b, sigma);
+    }
+  "
+
+  data <- list(N = nrow(X), K = ncol(X), X = X,
+               y = log(data.elisa$conc[data.elisa$conc!=0]))
+
+  foo <- stan(model_code=lm.nopool, data=data, iter=1)
+  fit <- stan(fit=foo, data=data, iter=10000)
+  log_lik1 <- extract_log_lik(fit)
+  loo1 <- loo(log_lik1)
+  print(loo1)
+
+#+END_SRC
+
+Multilevel model
+# R session lmer
+#+NAME:  multilevel model (partial pooling)
+#+BEGIN_SRC R :session *R* :results value
+     # multilevel  regression
+
+  lmer.part <- "
+  data {
+    int<lower=0> N;
+    int<lower=0> M;
+    int<lower=1,upper=M> test[N];
+    vector[N] x;
+    vector[N] y;
+  }
+  parameters {
+    vector[M] a1;
+    vector[M] a2;
+    real mu_a1;
+    real mu_a2;
+    real<lower=0,upper=100> sigma_a1;
+    real<lower=0,upper=100> sigma_a2;
+    real<lower=0,upper=100> sigma_y;
+  }
+  transformed parameters {
+    vector[N] y_hat;
+
+    for (i in 1:N)
+      y_hat[i] <- a1[test[i]] + a2[test[i]] * x[i];
+  }
+  model {
+    mu_a1 ~ normal(0, 100);
+    a1 ~ normal(mu_a1, sigma_a1);
+    mu_a2 ~ normal(0, 100);
+    a2 ~ normal(mu_a2, sigma_a2);
+
+    y ~ normal(y_hat, sigma_y);
+  }
+    generated quantities {
+      vector[N] log_lik;
+      for (n in 1:N)
+        log_lik[n] <- normal_log(y[n], y_hat[n], sigma_y);
+      }
+  "
+
+  temp <- data.elisa[data.elisa$conc!=0,]
+  data <- list(N=dim(temp)[1], M=nlevels(ordered(temp$Tests)),
+               test=as.numeric(ordered(temp$Tests)),
+               y=log(temp$conc), x=temp$y3)
+  foo <- stan(model_code=lmer.part, data=data, iter=1)
+  fit2 <- stan(fit=foo, data=data, iter=10000)
+  log_lik2 <- extract_log_lik(fit2)
+  loo2 <- loo(log_lik2)
+  print(loo2)
+
+  loo_diff <- compare(loo1, loo2)
+  print(loo_diff)
+
+  waic1 <- waic(log_lik1)
+  waic2 <- waic(log_lik2)
+  waic_diff <- compare(waic1, waic2)
+
+#+END_SRC
